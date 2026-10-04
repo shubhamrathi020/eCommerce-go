@@ -10,6 +10,8 @@ import (
 	"github.com/shubhamrathi020/eCommerce-go/internal/accounts"
 	"github.com/shubhamrathi020/eCommerce-go/internal/addresses"
 	"github.com/shubhamrathi020/eCommerce-go/internal/auth"
+	"github.com/shubhamrathi020/eCommerce-go/internal/cache"
+	"github.com/shubhamrathi020/eCommerce-go/internal/catalog"
 	"github.com/shubhamrathi020/eCommerce-go/internal/config"
 	"github.com/shubhamrathi020/eCommerce-go/internal/db"
 	"github.com/shubhamrathi020/eCommerce-go/internal/health"
@@ -49,6 +51,17 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	}
 	app.closers = append(app.closers, store.Close)
 
+	rdb, err := cache.OpenRedis(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	app.closers = append(app.closers, rdb.Close)
+	mongo, err := catalog.OpenMongo(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	app.closers = append(app.closers, mongo.Close)
+
 	guards := httpx.NewGuards(cfg)
 	throttle := httpx.NewThrottle(cfg.RateLimit)
 
@@ -57,11 +70,19 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	tokens := auth.NewTokens(cfg, store)
 	authService := auth.NewService(store, passwords, tokens, mail)
 
+	appCache := cache.New(rdb)
+	limiter := cache.NewRateLimiter(rdb, appCache, cfg)
+	search := catalog.NewSearch(cfg)
+	catalogService := catalog.NewService(mongo, search, appCache)
+
 	mux := http.NewServeMux()
+	catalog.NewHandler(catalogService, mongo, search, limiter.Bucket("search")).Register(mux)
+	catalog.NewAdminHandler(catalog.NewAdmin(mongo, search, appCache), guards).Register(mux)
+	cache.NewStatsHandler(appCache, guards, func() []any { return []any{search.BreakerStats()} }).Register(mux)
 	auth.NewHandler(authService, cfg, guards, throttle, nil).Register(mux)
 	accounts.NewHandler(accounts.NewService(store, passwords, tokens), cfg, guards).Register(mux)
 	addresses.NewHandler(addresses.NewService(store), guards).Register(mux)
-	health.NewHandler(cfg, mail, store.Ping).Register(mux)
+	health.NewHandler(cfg, mail, store.Ping, mongo.Ping, search.Health, rdb.Ping).Register(mux)
 	mux.HandleFunc("/", httpx.NotFound)
 
 	var h http.Handler = mux

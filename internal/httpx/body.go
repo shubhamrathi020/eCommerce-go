@@ -2,9 +2,12 @@ package httpx
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"unicode/utf8"
 
 	"github.com/shubhamrathi020/eCommerce-go/internal/apperr"
@@ -268,3 +271,84 @@ func Lenient(r *http.Request) map[string]any {
 }
 
 var _ = rawBodyKey
+
+// OrderedStringMap is StringMap that also reports the keys in the order they were sent (JavaScript object order).
+func (o *Obj) OrderedStringMap(key string) ([]string, map[string]string) {
+	raw, ok := o.m[key]
+	if !ok {
+		o.fail()
+		return nil, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if d, isDelim := tok.(json.Delim); err != nil || !isDelim || d != '{' {
+		o.fail()
+		return nil, nil
+	}
+	keys := []string{}
+	out := map[string]string{}
+	for dec.More() {
+		kt, err := dec.Token()
+		if err != nil {
+			o.fail()
+			return nil, nil
+		}
+		k, _ := kt.(string)
+		var v any
+		if err := dec.Decode(&v); err != nil {
+			o.fail()
+			return nil, nil
+		}
+		s, isStr := v.(string)
+		if !isStr {
+			b, _ := json.Marshal(v)
+			s = string(b)
+		}
+		if _, dup := out[k]; !dup {
+			keys = append(keys, k)
+		}
+		out[k] = s
+	}
+	return keys, out
+}
+
+// CacheJSON writes a publicly cacheable JSON response: Cache-Control and an ETag, and a bare 304 when the caller
+// already holds that version. Only for plain catalog reads that are the same for every shopper.
+func CacheJSON(w http.ResponseWriter, r *http.Request, maxAge int, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		WriteError(w, r, err)
+		return
+	}
+	sum := sha256.Sum256(b)
+	etag := `"` + hex.EncodeToString(sum[:])[:27] + `"`
+	w.Header().Set("Cache-Control", "public, max-age="+strconv.Itoa(maxAge))
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(append(b, '\n'))
+}
+
+// ObjectFrom validates one already-parsed JSON value (an array element) as an object with the allowed keys.
+func ObjectFrom(raw json.RawMessage, allowed ...string) *Obj {
+	o := &Obj{m: map[string]json.RawMessage{}}
+	if err := json.Unmarshal(raw, &o.m); err != nil || o.m == nil {
+		o.bad = true
+		o.m = map[string]json.RawMessage{}
+		return o
+	}
+	ok := map[string]bool{}
+	for _, k := range allowed {
+		ok[k] = true
+	}
+	for k := range o.m {
+		if !ok[k] {
+			o.bad = true
+		}
+	}
+	return o
+}
