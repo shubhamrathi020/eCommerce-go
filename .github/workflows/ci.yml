@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # the "Run workflow" button on the Actions tab
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Vet, test, and run the shared integration specs
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: { POSTGRES_USER: ecommerce, POSTGRES_PASSWORD: ecommerce, POSTGRES_DB: ecommerce }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ecommerce" --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:8-alpine
+        ports: ["6379:6379"]
+      mongo:
+        image: mongo:8
+        ports: ["27017:27017"]
+      rabbitmq:
+        image: rabbitmq:4-management-alpine
+        ports: ["5672:5672"]
+      meilisearch:
+        image: getmeili/meilisearch:v1.54
+        ports: ["7700:7700"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - run: go vet ./...
+      - run: go build -o bin/api ./cmd/api
+
+      # The Nest repository owns the schema and the integration specs; check it out and run those same specs
+      # against the binary built above.
+      - uses: actions/checkout@v4
+        with:
+          repository: shubhamrathi020/eCommerce-api
+          path: eCommerce-api
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: eCommerce-api/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install the Nest repository (for its migrations and specs)
+        working-directory: eCommerce-api
+        run: pnpm install --frozen-lockfile && pnpm db:generate
+
+      - name: Shared integration specs against the Go server
+        working-directory: eCommerce-api/apps/api
+        env:
+          GO_API_BIN: ${{ github.workspace }}/bin/api
+        run: pnpm exec vitest run test/
+
+      # The schema now exists in the test database, so the Go tests that need it can run too.
+      - run: go test -count=1 ./...

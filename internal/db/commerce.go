@@ -138,3 +138,9 @@ func CountUnpublishedOutbox(ctx context.Context, q DBTX) (int, error) {
 	err := q.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE "publishedAt" IS NULL`).Scan(&n)
 	return n, err
 }
+
+// BackdateCart makes a cart look untouched since the given time (tests only: updatedAt is otherwise always "now").
+func BackdateCart(ctx context.Context, q DBTX, ownerKey string, at time.Time) error {
+	_, err := q.Exec(ctx, `UPDATE carts SET "updatedAt"=$2 WHERE "ownerKey"=$1`, ownerKey, at.UTC())
+	return err
+}

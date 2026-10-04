@@ -16,6 +16,11 @@ import (
 )
 
 func main() {
+	// `api -healthcheck` asks the running server's /healthz and exits 0 or 1: the container HEALTHCHECK, since the
+	// runtime image has no shell or wget.
+	if len(os.Args) > 1 && os.Args[1] == "-healthcheck" {
+		os.Exit(healthcheck())
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -49,4 +54,17 @@ func run() error {
 		return srv.Shutdown(shutdown)
 	}
 	return nil
+}
+
+func healthcheck() int {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3333"
+	}
+	client := http.Client{Timeout: 3 * time.Second}
+	res, err := client.Get("http://127.0.0.1:" + port + "/healthz")
+	if err != nil || res.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
 }

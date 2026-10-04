@@ -55,9 +55,29 @@ func (p *Passwords) Verify(hash string, password string) bool {
 	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil || version != argon2.Version {
 		return false
 	}
+	// The parameters may come in any order: the reference implementation writes m,t,p; the Node package m,p,t.
 	var m, t uint32
 	var par uint8
-	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &par); err != nil {
+	var gotM, gotT, gotP bool
+	for _, kv := range strings.Split(parts[3], ",") {
+		var key string
+		var val uint32
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			key = kv[:i]
+			if _, err := fmt.Sscanf(kv[i+1:], "%d", &val); err != nil {
+				return false
+			}
+		}
+		switch key {
+		case "m":
+			m, gotM = val, true
+		case "t":
+			t, gotT = val, true
+		case "p":
+			par, gotP = uint8(val), true
+		}
+	}
+	if !gotM || !gotT || !gotP {
 		return false
 	}
 	enc := base64.RawStdEncoding
