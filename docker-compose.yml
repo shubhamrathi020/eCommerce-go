@@ -23,7 +23,7 @@ services:
       # Dev-only defaults so the stack runs out of the box; they must equal the Nest API's so tokens interoperate.
       JWT_ACCESS_SECRET: "dev-only-access-secret-change-me-please-32chars"
       JWT_REFRESH_SECRET: "dev-only-refresh-secret-change-me-please-32chr"
-      CORS_ORIGINS: "http://localhost:4000,http://localhost:4001,http://localhost:4200,http://localhost:4201,http://localhost:4202,http://localhost:5173,http://localhost:5174,http://localhost:5175"
+      CORS_ORIGINS: "http://localhost:4000,http://localhost:4001,http://localhost:4200,http://localhost:4201,http://localhost:4202,http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:4100,http://localhost:4101,http://localhost:4102"
     read_only: true
     cap_drop:
       - ALL
