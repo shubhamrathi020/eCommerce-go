@@ -65,7 +65,7 @@ jobs:
       - name: Shared integration specs against the Go server
         working-directory: eCommerce-api/apps/api
         env:
-          GO_API_BIN: ${{ github.workspace }}/bin/api
+          API_BIN: ${{ github.workspace }}/bin/api
         run: pnpm exec vitest run test/
 
       # The schema now exists in the test database, so the Go tests that need it can run too.

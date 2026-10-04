@@ -12,8 +12,8 @@ RabbitMQ), so a frontend can talk to either one and the two can even run side by
 
 ## How it is kept identical
 
-1. **The Nest test suite runs against this server.** `eCommerce-api` has a test harness mode: with `GO_API_BIN`
-   pointing at the binary built here, the 65 integration specs start it as a child process and run unchanged over
+1. **The Nest test suite runs against this server.** `eCommerce-api` has a test harness mode: with `API_BIN`
+   (formerly `GO_API_BIN`, which still works) pointing at the binary built here, the 65 integration specs start it as a child process and run unchanged over
    HTTP (auth, accounts, catalog, admin catalog, cart, checkout, orders, payments, messaging, metrics, the
    contract-shape checks). One test needs the Nest process's internals and is covered by a Go test instead.
 2. **The shared business rules are checked against golden output from the TypeScript original.** `testdata/golden.json`
@@ -22,6 +22,9 @@ RabbitMQ), so a frontend can talk to either one and the two can even run side by
 3. **Passwords and tokens interoperate.** Argon2id hashes are standard PHC strings in both directions, and the
    JWT access tokens use the same secret, claims, audience and issuer, so a user created on one server can sign in
    on the other and a token from one is accepted by the other.
+
+Two more implementations of the same API exist: [`eCommerce-node`](../eCommerce-node) (Express, port 3335) and
+[`eCommerce-dotnet`](../eCommerce-dotnet) (ASP.NET Core, port 3336). All four are held to the same specs and can run side by side.
 
 ## Run it
 
@@ -47,7 +50,7 @@ go vet ./... && go test ./...          # unit tests, the golden parity tests, th
 # the shared integration specs, against this server
 go build -o bin/api.exe ./cmd/api
 cd ../eCommerce-api/apps/api
-GO_API_BIN=<path to bin/api.exe> pnpm exec vitest run test/
+API_BIN=<path to bin/api.exe> pnpm exec vitest run test/
 ```
 
 Regenerate the golden file after the contract changes: `node testdata/gen/gen.mjs` (needs `eCommerce-contracts` built next to this repository).
