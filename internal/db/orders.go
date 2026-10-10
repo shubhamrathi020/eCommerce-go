@@ -110,6 +110,9 @@ type OrderUpdate struct {
 	ProviderOrderID   *string
 	ProviderPaymentID *string
 	PaymentDeadline   *time.Time
+	// OnlyIfUnpaid makes the update a no-op (and UpdateOrder return nil) when the order is already paid, so two reports of one
+	// payment (the browser and Razorpay's webhook) cannot both apply it.
+	OnlyIfUnpaid bool
 }
 
 // UpdateOrder changes the listed columns and returns the new row.
@@ -141,7 +144,11 @@ func UpdateOrder(ctx context.Context, q DBTX, id string, u OrderUpdate) (*Order,
 	if u.PaymentDeadline != nil {
 		add("paymentDeadline", "", u.PaymentDeadline.UTC())
 	}
-	return scanOrder(q.QueryRow(ctx, `UPDATE orders SET `+strings.Join(sets, ",")+` WHERE "id"=$1 RETURNING `+orderCols, args...))
+	where := `"id"=$1`
+	if u.OnlyIfUnpaid {
+		where += ` AND "paymentStatus" <> 'paid'`
+	}
+	return scanOrder(q.QueryRow(ctx, `UPDATE orders SET `+strings.Join(sets, ",")+` WHERE `+where+` RETURNING `+orderCols, args...))
 }
 
 // OrdersForUser lists a signed-in customer's orders, newest first.

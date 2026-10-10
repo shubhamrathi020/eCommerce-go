@@ -104,22 +104,44 @@ func (p *Payments) Confirm(ctx context.Context, orderID string, owner Owner, res
 	if !valid {
 		return nil, apperr.New(apperr.Validation, "Payment verification failed. If money was deducted it will be refunded.")
 	}
-	now := domain.ISO(time.Now())
-	timeline := append(timelineOf(row), domain.TimelineEntry{Status: "paid", Label: "Payment received", At: now}, domain.TimelineEntry{Status: "confirmed", Label: "Order confirmed", At: now})
-	total, _ := totalOf(row)
-	var updated *db.Order
-	err = p.store.Tx(ctx, func(tx pgx.Tx) error {
-		var e error
-		updated, e = db.UpdateOrder(ctx, tx, orderID, db.OrderUpdate{Status: strPtr("confirmed"), PaymentStatus: strPtr("paid"), ProviderPaymentID: &result.ProviderPaymentID, Timeline: mustJSON(timeline)})
-		if e != nil {
-			return e
-		}
-		return db.WriteOutbox(ctx, tx, "payment.confirmed", map[string]any{"orderId": orderID, "email": row.ContactEmail, "name": row.ContactName, "amount": total})
-	})
+	out, err := p.markPaid(ctx, row, result.ProviderPaymentID, nil)
 	if err != nil {
 		return nil, err
 	}
 	_ = p.cart.ReplaceWithEmpty(ctx, OwnerKey(owner.UserID, owner.GuestToken), domain.ShippingMethodID(row.ShippingMethod))
+	return out, nil
+}
+
+// markPaid marks an order paid and confirmed once, however many times the browser and the webhook report the same payment:
+// only the report that actually changes the row writes the confirmation email and publishes the live order event.
+func (p *Payments) markPaid(ctx context.Context, row *db.Order, providerPaymentID string, note *domain.OrderNote) (*domain.Order, error) {
+	now := domain.ISO(time.Now())
+	timeline := append(timelineOf(row), domain.TimelineEntry{Status: "paid", Label: "Payment received", At: now}, domain.TimelineEntry{Status: "confirmed", Label: "Order confirmed", At: now})
+	update := db.OrderUpdate{Status: strPtr("confirmed"), PaymentStatus: strPtr("paid"), ProviderPaymentID: &providerPaymentID, Timeline: mustJSON(timeline), OnlyIfUnpaid: true}
+	if note != nil {
+		update.Notes = mustJSON(append([]domain.OrderNote{*note}, notesOf(row)...))
+	}
+	total, _ := totalOf(row)
+	var updated *db.Order
+	err := p.store.Tx(ctx, func(tx pgx.Tx) error {
+		var e error
+		updated, e = db.UpdateOrder(ctx, tx, row.ID, update)
+		if e != nil || updated == nil {
+			return e
+		}
+		return db.WriteOutbox(ctx, tx, "payment.confirmed", map[string]any{"orderId": row.ID, "email": row.ContactEmail, "name": row.ContactName, "amount": total})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil { // already paid: report the order as it is now
+		current, err := db.OrderByID(ctx, p.store.Pool, row.ID)
+		if err != nil || current == nil {
+			return nil, err
+		}
+		out := ToOrder(current)
+		return &out, nil
+	}
 	out := ToOrder(updated)
 	p.events.Publish(ctx, out)
 	return &out, nil
@@ -148,7 +170,7 @@ func (p *Payments) Fail(ctx context.Context, orderID string, owner Owner, reason
 		return &out, nil
 	}
 	_ = p.inventory.GiveBack(ctx, StockLinesOf(row))
-	note := domain.OrderNote{ID: newNoteID(), At: domain.ISO(time.Now()), Author: "system", Text: "Payment attempt failed: " + reason}
+	note := systemNote("Payment attempt failed: " + reason)
 	notes := append([]domain.OrderNote{note}, notesOf(row)...)
 	updated, err := db.UpdateOrder(ctx, p.store.Pool, orderID, db.OrderUpdate{PaymentStatus: strPtr("failed"), Notes: mustJSON(notes)})
 	if err != nil {
@@ -158,8 +180,16 @@ func (p *Payments) Fail(ctx context.Context, orderID string, owner Owner, reason
 	return &out, nil
 }
 
-// HandleWebhook applies a verified Razorpay event idempotently: an event already applied is acknowledged again
-// without re-applying it.
+func systemNote(text string) domain.OrderNote {
+	return domain.OrderNote{ID: newNoteID(), At: domain.ISO(time.Now()), Author: "system", Text: text}
+}
+
+// HandleWebhook applies a verified Razorpay event idempotently. It is the safety net for a payment the browser never reported
+// (closed tab, lost connection, a UPI request approved later).
+//
+// Only a captured payment changes anything. Razorpay sends payment.failed for every failed attempt, also while its window is
+// still open and the shopper tries another method, so a failure here must not give the stock back (the browser reports a real
+// give-up through Fail, and the payment-deadline sweep releases an abandoned order).
 func (p *Payments) HandleWebhook(ctx context.Context, body []byte) {
 	var event struct {
 		Event   string `json:"event"`
@@ -176,21 +206,21 @@ func (p *Payments) HandleWebhook(ctx context.Context, body []byte) {
 		return
 	}
 	payment := event.Payload.Payment.Entity
-	if payment.OrderID == "" {
+	if event.Event != "payment.captured" || payment.OrderID == "" || payment.ID == "" {
 		return
 	}
 	order, err := db.OrderByProviderOrderID(ctx, p.store.Pool, payment.OrderID)
-	if err != nil || order == nil {
+	if err != nil || order == nil || order.PaymentStatus == "paid" || order.Status != "pending_payment" {
 		return
 	}
-	switch {
-	case event.Event == "payment.captured" && order.PaymentStatus != "paid" && order.Status == "pending_payment":
-		now := domain.ISO(time.Now())
-		timeline := append(timelineOf(order), domain.TimelineEntry{Status: "paid", Label: "Payment received", At: now}, domain.TimelineEntry{Status: "confirmed", Label: "Order confirmed", At: now})
-		pid := payment.ID
-		_, _ = db.UpdateOrder(ctx, p.store.Pool, order.ID, db.OrderUpdate{Status: strPtr("confirmed"), PaymentStatus: strPtr("paid"), ProviderPaymentID: &pid, Timeline: mustJSON(timeline)})
-	case event.Event == "payment.failed" && order.PaymentStatus == "pending":
-		_ = p.inventory.GiveBack(ctx, StockLinesOf(order))
-		_, _ = db.UpdateOrder(ctx, p.store.Pool, order.ID, db.OrderUpdate{PaymentStatus: strPtr("failed")})
+	var shortfall *domain.OrderNote
+	if order.PaymentStatus == "failed" {
+		// The browser reported a failure, which released the stock hold, before this payment was captured: take it again.
+		if err := p.inventory.Take(ctx, StockLinesOf(order)); err != nil {
+			// The money is taken, so the order is confirmed anyway; staff see why it may not be shippable.
+			n := systemNote("Paid after its stock hold was released, and the items could not be reserved again. Check stock before shipping, or cancel and refund.")
+			shortfall = &n
+		}
 	}
+	_, _ = p.markPaid(ctx, order, payment.ID, shortfall)
 }

@@ -13,7 +13,7 @@ RabbitMQ), so a frontend can talk to either one and the two can even run side by
 ## How it is kept identical
 
 1. **The Nest test suite runs against this server.** `eCommerce-api` has a test harness mode: with `API_BIN`
-   (formerly `GO_API_BIN`, which still works) pointing at the binary built here, the 65 integration specs start it as a child process and run unchanged over
+   (formerly `GO_API_BIN`, which still works) pointing at the binary built here, the 68 integration specs start it as a child process and run unchanged over
    HTTP (auth, accounts, catalog, admin catalog, cart, checkout, orders, payments, messaging, metrics, the
    contract-shape checks). One test needs the Nest process's internals and is covered by a Go test instead.
 2. **The shared business rules are checked against golden output from the TypeScript original.** `testdata/golden.json`
